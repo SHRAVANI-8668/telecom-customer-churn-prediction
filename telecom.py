@@ -8,19 +8,7 @@ app = Flask(__name__)
 # Load model
 pipeline = joblib.load('models/telecom_pipeline.pkl')
        
-def save_prediction(
-    intl_calls,
-    intl_charge,
-    day_mins,
-    day_charge,
-    eve_mins,
-    eve_charge,
-    night_mins,
-    night_charge,
-    customer_calls,
-    intl_plan,
-    churn_prediction,
-    churn_probability):
+def save_bulk_predictions(df):
 
     conn = mysql.connector.connect(
         host="localhost",
@@ -33,38 +21,39 @@ def save_prediction(
     
     sql = """
 INSERT INTO tele_churn_predictions(
+    intl_plan,
     intl_calls,
     intl_charge,
     day_mins,
     day_charge,
-    eve_mins,
     eve_charge,
     night_mins,
-    night_charge,
     customer_calls,
-    intl_plan,
     churn_prediction,
     churn_probability
 )
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 """
 
-    values = (
-    intl_calls,
-    intl_charge,
-    day_mins,
-    day_charge,
-    eve_mins,
-    eve_charge,
-    night_mins,
-    night_charge,
-    customer_calls,
-    intl_plan,
-    churn_prediction,
-    churn_probability
-)
+    values = []
 
-    cursor.execute(sql, values)
+    for _, row in df.iterrows():
+
+        values.append((
+            row["intl_plan"],
+            row["intl_calls"],
+            row["intl_charge"],
+            row["day_mins"],
+            row["day_charge"],
+            row["eve_charge"],
+            row["night_mins"],
+            row["customer_calls"],
+            row["prediction_text"],
+            row["probability"]
+        ))
+
+    cursor.executemany(sql, values)
+
     conn.commit()
 
     cursor.close()
@@ -75,64 +64,71 @@ VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 def home():
     return render_template("index.html")
 
-@app.route("/predict", methods=["POST"])
-def predict():
-    intl_calls = float(request.form["intl_calls"])
-    intl_charge = float(request.form["intl_charge"])
-    day_mins = float(request.form["day_mins"])
-    day_charge = int(request.form["day_charge"])
-    eve_mins = float(request.form["eve_mins"])
-    eve_charge = int(request.form["eve_charge"])
-    night_mins = int(request.form["night_mins"])
-    night_charge = float(request.form["night_charge"])
-    customer_calls = float(request.form["customer_calls"])
-    intl_plan = float(request.form["intl_plan"])
-   
-   
+@app.route("/bulk_predict", methods=["POST"])
+def bulk_predict():
 
-    data = pd.DataFrame({
-        "intl_calls":[intl_calls],
-        "intl_charge":[intl_charge],
-        "day_mins":[day_mins],
-        "day_charge":[day_charge],
-        "eve_mins":[eve_mins],
-        "eve_charge":[eve_charge],
-        "night_mins":[night_mins],
-        "night_charge":[night_charge],
-        "customer_calls":[customer_calls],
-        "intl_plan":[intl_plan]
-    
-    })
+    file = request.files["file"]
 
+    if file.filename == "":
+        return "No file selected"
 
-    prediction = pipeline.predict(data)[0]
-    probability = pipeline.predict_proba(data)[0][1]
+    df = pd.read_csv(file)
 
-    if prediction == 1:
-        result = "Customer has not left the company"
-    else:
-        result = "Customer has left the company"
+    # Columns expected by the model
+    required_columns = [
+    'intl_plan',
+    'intl_calls',
+    'intl_charge',
+    'day_mins',
+    'day_charge',
+    'eve_charge',
+    'night_mins',
+    'customer_calls'
+    ]
 
-    save_prediction(
-        intl_calls,
-        intl_charge,
-        day_mins,
-        day_charge,
-        eve_mins,
-        eve_charge,
-        night_mins,
-        night_charge,
-        customer_calls,
-        intl_plan,
-        result,
-        probability)
-    
-    return render_template(
-        "index.html",
-        prediction_text=result
+    # Check columns
+    missing_columns = [
+        col for col in required_columns
+        if col not in df.columns
+    ]
+
+    if missing_columns:
+        return f"Missing columns: {missing_columns}"
+
+    # Select required features
+    X = df[required_columns]
+
+    # Predict all customers
+    predictions = pipeline.predict(X)
+
+    probabilities = pipeline.predict_proba(X)[:, 1]
+
+    # Add predictions to dataframe
+    df["prediction"] = predictions
+    df["probability"] = probabilities
+
+    # Convert prediction to readable text
+    df["prediction_text"] = df["prediction"].apply(
+        lambda x:
+        "Customer likely to Churn"
+        if x == 1
+        else
+        "Customer unlikely to Churn "
     )
-
     
+    # Save to SQL
+    save_bulk_predictions(df)
+
+    return render_template(
+        "results.html",
+        tables=[
+            df.to_html(
+                classes="table",
+                index=False
+            )
+        ]
+    )
+        
 
 if __name__ == "__main__":
     app.run(debug=True)
